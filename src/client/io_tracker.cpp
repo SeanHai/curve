@@ -154,7 +154,7 @@ void IOTracker::DoRead(MDSClient* mdsclient, const FInfo_t* fileInfo) {
 
 int IOTracker::ReadFromOrigin(std::vector<RequestContext*> reqCtxVec,
                               UserInfo_t userInfo) {
-    // curveClient_ 如何优雅的传入?
+    // curveClient_ 如何获取?
     if (curveClient_ == nullptr) {
         LOG(ERROR) << "Failed to read curve file."
                    << "curve client is disabled";
@@ -186,9 +186,9 @@ int IOTracker::ReadFromOrigin(std::vector<RequestContext*> reqCtxVec,
         curveCombineCtx->curveCtx.offset = reqCtx->sourceInfo_.cloneFileOffset
                                             + reqCtx->offset_;
         curveCombineCtx->curveCtx.length = reqCtx->rawlength_;
-        curveCombineCtx->curveCtx.buf = reqCtx->readData_;
-        curveCombineCtx->curveCtx.op = reqCtx->optype_;
-        curveCombineCtx->curveCtx.cb = CurveAioCallback();
+        curveCombineCtx->curveCtx.buf = &reqCtx->readData_;
+        curveCombineCtx->curveCtx.op = LIBCURVE_OP::LIBCURVE_OP_READ;
+        curveCombineCtx->curveCtx.cb = CurveAioCallback;
 
         int ret = curveClient_->AioRead(fd, &curveCombineCtx->curveCtx);
         if (ret !=  LIBCURVE_ERROR::OK) {
@@ -201,6 +201,7 @@ int IOTracker::ReadFromOrigin(std::vector<RequestContext*> reqCtxVec,
             doneGuard.release();
         }
     }
+    return 0;
 }
 
 void IOTracker::StartWrite(const void* buf, off_t offset, size_t length,
