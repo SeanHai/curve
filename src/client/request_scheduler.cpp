@@ -91,6 +91,12 @@ int RequestScheduler::ScheduleRequest(
     if (running_.load(std::memory_order_acquire)) {
         /* TODO(wudemiao): 后期考虑 qos */
         for (auto it : requests) {
+            // skip the fake request
+            if(0 == it->idinfo_.lpid_ && 0 == it->idinfo_.cpid_
+                                      && 0 == it->idinfo_.cid_) {
+                continue;
+            }
+
             BBQItem<RequestContext *> req(it);
             queue_.PutBack(req);
         }

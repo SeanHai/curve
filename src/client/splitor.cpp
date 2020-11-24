@@ -180,10 +180,12 @@ bool Splitor::AssignInternal(IOTracker* iotracker, MetaCache* metaCache,
         metaCache->GetChunkInfoByIndex(chunkidx, &chunkIdInfo);
 
     if (errCode == MetaCacheErrorType::CHUNKINFO_NOT_FOUND) {
+        bool isAllocateSegment =
+            iotracker->Optype() == OpType::READ ? false : true;
         if (false == GetOrAllocateSegment(
-                         true,
+                         isAllocateSegment,
                          static_cast<uint64_t>(chunkidx) * fileinfo->chunksize,
-                         mdsclient, metaCache, fileinfo)) {
+                         mdsclient, metaCache, fileinfo, chunkidx)) {
             return false;
         }
 
@@ -193,6 +195,14 @@ bool Splitor::AssignInternal(IOTracker* iotracker, MetaCache* metaCache,
     if (errCode == MetaCacheErrorType::OK) {
         int ret = 0;
         uint64_t appliedindex_ = 0;
+
+        // check whether the chunkIdInfo is normal
+        if(chunkIdInfo.lpid_ == 0 && chunkIdInfo.cpid_ == 0 &&
+                                     chunkIdInfo.cid_ == 0) {
+            if(iotracker->Optype() == OpType::WRITE) {
+                return false;
+            }
+        }
 
         // only read needs applied-index
         if (iotracker->Optype() == OpType::READ) {
@@ -227,8 +237,11 @@ bool Splitor::GetOrAllocateSegment(bool allocateIfNotExist,
                                    uint64_t offset,
                                    MDSClient* mdsClient,
                                    MetaCache* metaCache,
-                                   const FInfo* fileInfo) {
+                                   const FInfo* fileInfo,
+                                   ChunkIndex chunkidx) {
     SegmentInfo segmentInfo;
+    // this chunkIdInfo(0, 0, 0) identify the unallocated chunk when read
+    ChunkIDInfo chunkIdInfo(0, 0, 0);
     LIBCURVE_ERROR errCode = mdsClient->GetOrAllocateSegment(
         allocateIfNotExist, offset, fileInfo, &segmentInfo);
 
@@ -237,6 +250,9 @@ bool Splitor::GetOrAllocateSegment(bool allocateIfNotExist,
         LOG(ERROR) << "GetOrAllocateSegmen failed, filename: "
                    << fileInfo->filename << ", offset: " << offset;
         return false;
+    } else if (errCode == LIBCURVE_ERROR::NOT_ALLOCATE) {
+        metaCache->UpdateChunkInfoByIndex(chunkidx, chunkIdInfo);
+        return true;
     }
 
     const auto chunksize = fileInfo->chunksize;

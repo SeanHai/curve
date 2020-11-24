@@ -59,6 +59,24 @@ IOTracker::IOTracker(IOManager* iomanager,
     opStartTimePoint_ = curve::common::TimeUtility::GetTimeofDayUs();
 }
 
+struct CurveAioCombineContext {
+    RequestClosure* done;
+    CurveAioContext curveCtx;
+};
+
+void CurveAioCallback(struct CurveAioContext* context) {
+    auto curveCombineCtx = reinterpret_cast<CurveAioCombineContext *>(
+        reinterpret_cast<char *>(context) -
+        offsetof(CurveAioCombineContext, curveCtx));
+    RequestClosure* done = curveCombineCtx->done;
+    if (context->ret < 0) {
+        done->SetFailed(LIBCURVE_ERROR::FAILED);
+    }
+    delete curveCombineCtx;
+
+    brpc::ClosureGuard doneGuard(done);
+}
+
 void IOTracker::StartRead(void* buf, off_t offset, size_t length,
                           MDSClient* mdsclient, const FInfo_t* fileInfo) {
     data_ = buf;
@@ -91,15 +109,38 @@ void IOTracker::DoRead(MDSClient* mdsclient, const FInfo_t* fileInfo) {
     if (ret == 0) {
         PrepareReadIOBuffers(reqlist_.size());
         uint32_t subIoIndex = 0;
+        uint32_t fakeReqNum = 0;
+        std::vector<RequestContext*> originReadVec;
 
-        reqcount_.store(reqlist_.size(), std::memory_order_release);
-        std::for_each(reqlist_.begin(), reqlist_.end(), [&](RequestContext* r) {
+        for(auto r : reqlist_) {
+            // fake subrequest
+            if(0 == r->idinfo_.lpid_ && 0 == r->idinfo_.cpid_
+                                     && 0 == r->idinfo_.cid_) {
+                // the clone source is empty
+                if(r->sourceInfo_.cloneFileSource.empty()) {
+                    // add zero data
+                    std::string zeroData(r->rawlength_, 0);
+                    butil::IOBuf zeroDataBuf;
+                    zeroDataBuf.append(zeroData);
+                    readDatas_[r->subIoIndex_] = zeroDataBuf;
+                    fakeReqNum++;
+                } else {
+                    // read from original volume
+                    originReadVec.push_back(r);
+                }
+
+                r->subIoIndex_ = subIoIndex++;
+                continue;
+            }
+
             r->done_->SetFileMetric(fileMetric_);
             r->done_->SetIOManager(iomanager_);
             r->subIoIndex_ = subIoIndex++;
-        });
+        }
 
+        reqcount_.store(reqlist_.size()-fakeReqNum, std::memory_order_release);
         ret = scheduler_->ScheduleRequest(reqlist_);
+        ret = ReadFromOrigin(originReadVec, fileInfo->userinfo);
     } else {
         LOG(ERROR) << "splitor read io failed, "
                    << "offset = " << offset_ << ", length = " << length_;
@@ -108,6 +149,57 @@ void IOTracker::DoRead(MDSClient* mdsclient, const FInfo_t* fileInfo) {
     if (ret == -1) {
         LOG(ERROR) << "split or schedule failed, return and recycle resource!";
         ReturnOnFail();
+    }
+}
+
+int IOTracker::ReadFromOrigin(std::vector<RequestContext*> reqCtxVec,
+                              UserInfo_t userInfo) {
+    // curveClient_ 如何优雅的传入?
+    if (curveClient_ == nullptr) {
+        LOG(ERROR) << "Failed to read curve file."
+                   << "curve client is disabled";
+        return -1;
+    }
+    for(auto reqCtx : reqCtxVec) {
+        brpc::ClosureGuard doneGuard(reqCtx->done_);
+        std::string fileName = reqCtx->sourceInfo_.cloneFileSource;
+        int fd = 0;
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            auto iter = fdMap_.find(fileName);
+            if (iter != fdMap_.end()) {
+                fd = iter->second;
+            } else {
+                fd = curveClient_->Open4ReadOnly(fileName, userInfo);
+                if (fd < 0) {
+                    LOG(ERROR) << "Open curve file failed."
+                            << "file name: " << fileName
+                            << " ,return code: " << fd;
+                    return -1;
+                }
+                fdMap_[fileName] = fd;
+            }
+        }
+
+        CurveAioCombineContext *curveCombineCtx = new CurveAioCombineContext();
+        curveCombineCtx->done = reqCtx->done_;
+        curveCombineCtx->curveCtx.offset = reqCtx->sourceInfo_.cloneFileOffset
+                                            + reqCtx->offset_;
+        curveCombineCtx->curveCtx.length = reqCtx->rawlength_;
+        curveCombineCtx->curveCtx.buf = reqCtx->readData_;
+        curveCombineCtx->curveCtx.op = reqCtx->optype_;
+        curveCombineCtx->curveCtx.cb = CurveAioCallback();
+
+        int ret = curveClient_->AioRead(fd, &curveCombineCtx->curveCtx);
+        if (ret !=  LIBCURVE_ERROR::OK) {
+            LOG(ERROR) << "Read curve file failed."
+                    << "file name: " << fileName
+                    << " ,error code: " << ret;
+            delete curveCombineCtx;
+            return -1;
+        } else {
+            doneGuard.release();
+        }
     }
 }
 

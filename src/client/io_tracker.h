@@ -246,6 +246,15 @@ class CURVE_CACHELINE_ALIGNMENT IOTracker {
     // perform read operation
     void DoRead(MDSClient* mdsclient, const FInfo_t* fileInfo);
 
+    /**
+     *  read from the origin
+     *  @param: reqCtxVec the read request context vector
+     *  @param: the user info
+     *  @return 0 success; -1 fail
+     */
+    int ReadFromOrigin(std::vector<RequestContext*> reqCtxVec,
+                       UserInfo_t userInfo);
+
     // perform write operation
     void DoWrite(MDSClient* mdsclient, const FInfo_t* fileInfo);
 
@@ -312,6 +321,12 @@ class CURVE_CACHELINE_ALIGNMENT IOTracker {
 
     // id生成器
     static std::atomic<uint64_t> tracekerID_;
+
+    // 保护fdMap_的互斥锁
+    std::mutex  mtx_;
+
+    // 文件名->文件fd 的映射
+    std::unordered_map<std::string, int> fdMap_;
 };
 }   // namespace client
 }   // namespace curve
